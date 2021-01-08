@@ -367,5 +367,8 @@ deployments. If this is incorrect, manually set it using the CLI command
 
 Advertise Address: %[2]s
 Web UI Address: %[3]s
+
+To launch and authenticate into the Web UI, run:
+waypoint ui -authenticate
 `)
 )

@@ -8,6 +8,7 @@ import (
 	"io/ioutil"
 	"net"
 	"os/exec"
+	"strconv"
 	"strings"
 	"time"
 
@@ -1031,7 +1032,7 @@ func newDeployment(c k8sConfig, opts *InstallRunnerOpts) (*appsv1.Deployment, er
 	// This is the port we'll use for the liveness check with the
 	// runner. This isn't exposed outside the pod so it doesn't really
 	// matter what it is.
-	const livenessPort = "1234"
+	const livenessPort = 1234
 
 	cpuRequest, err := resource.ParseQuantity(c.cpuRequest)
 	if err != nil {
@@ -1104,12 +1105,12 @@ func newDeployment(c k8sConfig, opts *InstallRunnerOpts) (*appsv1.Deployment, er
 								"runner",
 								"agent",
 								"-vvv",
-								"-liveness-tcp-addr=:" + livenessPort,
+								"-liveness-tcp-addr=:" + strconv.Itoa(livenessPort),
 							},
 							LivenessProbe: &apiv1.Probe{
 								Handler: apiv1.Handler{
 									TCPSocket: &apiv1.TCPSocketAction{
-										Port: intstr.FromString(livenessPort),
+										Port: intstr.FromInt(livenessPort),
 									},
 								},
 							},

@@ -9,6 +9,7 @@ import (
 	"github.com/buildpacks/pack"
 	"github.com/buildpacks/pack/logging"
 	"github.com/docker/docker/client"
+	"github.com/hashicorp/go-hclog"
 	"github.com/hashicorp/waypoint-plugin-sdk/component"
 	"github.com/hashicorp/waypoint-plugin-sdk/docs"
 	"github.com/hashicorp/waypoint-plugin-sdk/terminal"
@@ -39,6 +40,9 @@ type BuilderConfig struct {
 	// The Buildpack builder image to use, defaults to the standard heroku one.
 	Builder string `hcl:"builder,optional"`
 
+	// The exact buildpacks to use.
+	Buildpacks []string `hcl:"buildpacks,optional"`
+
 	// Environment variables that are meant to configure the application in a static
 	// way. This might be control an image that has mulitple modes of operation,
 	// selected via environment variable. Most configuration should use the waypoint
@@ -63,23 +67,12 @@ func (b *Builder) Build(
 	ui terminal.UI,
 	jobInfo *component.JobInfo,
 	src *component.Source,
+	log hclog.Logger,
 ) (*DockerImage, error) {
 	builder := b.config.Builder
 	if builder == "" {
 		builder = DefaultBuilder
 	}
-
-	ui.Output("Creating new buildpack-based image using builder: %s", builder)
-
-	sg := ui.StepGroup()
-
-	step := sg.Add("Creating pack client")
-	defer step.Abort()
-
-	build := sg.Add("Building image")
-	defer build.Abort()
-
-	log := logging.New(build.TermOutput())
 
 	dockerClient, err := wpdockerclient.NewClientWithOpts(
 		client.FromEnv,
@@ -94,8 +87,40 @@ func (b *Builder) Build(
 		return nil, err
 	}
 
+	// We now test if Docker is actually functional. Pack requires a Docker
+	// daemon and we can't fallback to "img" or any other Dockerless solution.
+	log.Debug("testing if Docker is available")
+	if fallback, err := wpdockerclient.Fallback(ctx, log, dockerClient); err != nil {
+		log.Warn("error during check if we should use Docker fallback", "err", err)
+		return nil, status.Errorf(codes.Internal,
+			"error validating Docker connection: %s", err)
+	} else if fallback {
+		ui.Output(
+			`WARNING: `+
+				`Docker daemon appears unavailable. The 'pack' builder requires access `+
+				`to a Docker daemon. Pack does not support dockerless builds. We will `+
+				`still attempt to run the build but it will likely fail. If you are `+
+				`running this build locally, please install Docker. If you are running `+
+				`this build remotely (in a Waypoint runner), the runner must be configured `+
+				`to have access to the Docker daemon.`+"\n",
+			terminal.WithWarningStyle(),
+		)
+	} else {
+		log.Debug("Docker appears available")
+	}
+
+	ui.Output("Creating new buildpack-based image using builder: %s", builder)
+
+	sg := ui.StepGroup()
+
+	step := sg.Add("Creating pack client")
+	defer step.Abort()
+
+	build := sg.Add("Building image")
+	defer build.Abort()
+
 	client, err := pack.NewClient(
-		pack.WithLogger(log),
+		pack.WithLogger(logging.New(build.TermOutput())),
 		pack.WithDockerClient(dockerClient),
 	)
 	if err != nil {
@@ -105,10 +130,11 @@ func (b *Builder) Build(
 	step.Done()
 
 	err = client.Build(ctx, pack.BuildOptions{
-		Image:   src.App,
-		Builder: builder,
-		AppPath: src.Path,
-		Env:     b.config.StaticEnvVars,
+		Image:      src.App,
+		Builder:    builder,
+		AppPath:    src.Path,
+		Env:        b.config.StaticEnvVars,
+		Buildpacks: b.config.Buildpacks,
 		FileFilter: func(file string) bool {
 			// Do not include the bolt.db or bolt.db.lock
 			// These files hold the local state when Waypoint is running without a server
@@ -231,7 +257,17 @@ func (b *Builder) Documentation() (*docs.Documentation, error) {
 		return nil, err
 	}
 
-	doc.Description("Create a Docker image using CloudNative Buildpacks")
+	doc.Description(`
+Create a Docker image using CloudNative Buildpacks.
+
+**Pack requires access to a Docker daemon.** For remote builds, such as those
+triggered by [Git polling](/docs/projects/git), the
+[runner](/docs/runner) needs to have access to a Docker daemon such
+as exposing the Docker socket, enabling Docker-in-Docker, etc. Unfortunately,
+pack doesn't support dockerless builds. Configuring Docker access within
+a Docker container is outside the scope of these docs, please search the
+internet for "Docker in Docker" or other terms for more information.
+`)
 
 	doc.Example(`
 build {
@@ -264,6 +300,15 @@ build {
 		"builder",
 		"The buildpack builder image to use",
 		docs.Default(DefaultBuilder),
+	)
+
+	doc.SetField(
+		"buildpacks",
+		"The exact buildpacks to use",
+		docs.Summary(
+			"If set, the builder will run these buildpacks in the specified order.\n\n",
+			"They can be listed using several [URI formats](https://buildpacks.io/docs/app-developer-guide/specific-buildpacks).",
+		),
 	)
 
 	doc.SetField(

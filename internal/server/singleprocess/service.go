@@ -1,6 +1,7 @@
 package singleprocess
 
 import (
+	"context"
 	"sync"
 
 	"github.com/boltdb/bolt"
@@ -36,6 +37,16 @@ type service struct {
 	urlCEBMu      sync.RWMutex
 	urlCEB        *pb.EntrypointConfig_URLService
 	urlCEBWatchCh chan struct{}
+
+	// bgCtx is used for background tasks within the service. This is
+	// cancelled when Close is called.
+	bgCtx       context.Context
+	bgCtxCancel context.CancelFunc
+
+	// bgWg is incremented for every background goroutine that the
+	// service starts up. When Close is called, we wait on this to ensure
+	// that we fully shut down before returning.
+	bgWg sync.WaitGroup
 }
 
 // New returns a Waypoint server implementation that uses BotlDB plus
@@ -98,7 +109,7 @@ func New(opts ...Option) (pb.WaypointServer, error) {
 
 		if err := s.initURLClient(
 			log.Named("url_service"),
-			false,
+			nil,
 			cfg.acceptUrlTerms,
 			&cfgCopy,
 		); err != nil {
@@ -124,7 +135,30 @@ func New(opts ...Option) (pb.WaypointServer, error) {
 		}
 	}
 
+	// Setup the background context that is used for internal tasks
+	s.bgCtx, s.bgCtxCancel = context.WithCancel(context.Background())
+
+	// Start our polling background goroutine. We have a single goroutine
+	// that we run in the background that handles the queue of all polling
+	// operations. See the func docs for more info.
+	s.bgWg.Add(1)
+	go s.runPollQueuer(s.bgCtx, &s.bgWg, log.Named("poll_queuer"))
+
+	// Start out state pruning background goroutine. This calls
+	// Prune on the state every 10 minutes.
+	s.bgWg.Add(1)
+	go s.runPrune(s.bgCtx, &s.bgWg, log.Named("prune"))
+
 	return &s, nil
+}
+
+// Close shuts down any background processes and resources that may
+// be used by the service. This should be called after the service
+// is no longer responding to requests.
+func (s *service) Close() error {
+	s.bgCtxCancel()
+	s.bgWg.Wait()
+	return nil
 }
 
 type config struct {

@@ -14,6 +14,10 @@ func (s *service) UpsertProject(
 	ctx context.Context,
 	req *pb.UpsertProjectRequest,
 ) (*pb.UpsertProjectResponse, error) {
+	if err := serverptypes.ValidateUpsertProjectRequest(req); err != nil {
+		return nil, err
+	}
+
 	result := req.Project
 	if err := s.state.ProjectPut(result); err != nil {
 		return nil, err
@@ -32,7 +36,16 @@ func (s *service) GetProject(
 		return nil, err
 	}
 
-	return &pb.GetProjectResponse{Project: result}, nil
+	// Get all the workspaces that this project is part of
+	workspaces, err := s.state.ProjectListWorkspaces(req.Project)
+	if err != nil {
+		return nil, err
+	}
+
+	return &pb.GetProjectResponse{
+		Project:    result,
+		Workspaces: workspaces,
+	}, nil
 }
 
 // TODO: test

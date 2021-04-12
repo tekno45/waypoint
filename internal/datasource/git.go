@@ -14,12 +14,14 @@ import (
 	"github.com/go-git/go-git/v5/plumbing/transport"
 	"github.com/go-git/go-git/v5/plumbing/transport/http"
 	"github.com/go-git/go-git/v5/plumbing/transport/ssh"
+	"github.com/go-git/go-git/v5/storage/memory"
 	"github.com/golang/protobuf/ptypes"
 	"github.com/golang/protobuf/ptypes/timestamp"
 	"github.com/hashicorp/go-hclog"
 	"github.com/hashicorp/hcl/v2"
 	"github.com/hashicorp/hcl/v2/gohcl"
 	"github.com/mitchellh/mapstructure"
+	cryptossh "golang.org/x/crypto/ssh"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
@@ -30,6 +32,17 @@ import (
 type GitSource struct{}
 
 func newGitSource() Sourcer { return &GitSource{} }
+
+func (s *GitSource) RefToOverride(ref *pb.Job_DataSource_Ref) (map[string]string, error) {
+	gitRef, ok := ref.Ref.(*pb.Job_DataSource_Ref_Git)
+	if !ok {
+		return nil, status.Errorf(codes.Internal, "ref is not a git ref: %T", ref.Ref)
+	}
+
+	return map[string]string{
+		"ref": gitRef.Git.Commit,
+	}, nil
+}
 
 func (s *GitSource) ProjectSource(body hcl.Body, ctx *hcl.EvalContext) (*pb.Job_DataSource, error) {
 	// Decode
@@ -42,6 +55,7 @@ func (s *GitSource) ProjectSource(body hcl.Body, ctx *hcl.EvalContext) (*pb.Job_
 	result := &pb.Job_Git{
 		Url:  cfg.Url,
 		Path: cfg.Path,
+		Ref:  cfg.Ref,
 	}
 	switch {
 	case cfg.Username != "":
@@ -160,32 +174,9 @@ func (s *GitSource) Get(
 	}
 
 	// Setup auth information
-	var auth transport.AuthMethod
-	switch authcfg := source.Git.Auth.(type) {
-	case *pb.Job_Git_Basic_:
-		ui.Output("Auth: username/password", terminal.WithInfoStyle())
-		auth = &http.BasicAuth{
-			Username: authcfg.Basic.Username,
-			Password: authcfg.Basic.Password,
-		}
-
-	case *pb.Job_Git_Ssh:
-		ui.Output("Auth: ssh", terminal.WithInfoStyle())
-		auth, err = ssh.NewPublicKeys(
-			authcfg.Ssh.User,
-			authcfg.Ssh.PrivateKeyPem,
-			authcfg.Ssh.Password,
-		)
-		if err != nil {
-			return "", nil, nil, status.Errorf(codes.FailedPrecondition,
-				"Failed to load private key for Git auth: %s", err)
-		}
-
-	case nil:
-		// Do nothing
-
-	default:
-		log.Warn("unknown auth configuration, ignoring: %T", source.Git.Auth)
+	auth, err := s.auth(log, ui, source)
+	if err != nil {
+		return "", nil, nil, err
 	}
 
 	// Clone
@@ -206,6 +197,7 @@ func (s *GitSource) Get(
 	if ref := source.Git.Ref; ref != "" {
 		// We have to fetch all the refs so that ResolveRevisoin can find them.
 		err = repo.Fetch(&git.FetchOptions{
+			Auth:     auth,
 			RefSpecs: []config.RefSpec{"refs/*:refs/*", "HEAD:refs/heads/HEAD"},
 		})
 		if err != nil {
@@ -280,6 +272,171 @@ func (s *GitSource) Get(
 	}, closer, nil
 }
 
+func (s *GitSource) Changes(
+	ctx context.Context,
+	log hclog.Logger,
+	ui terminal.UI,
+	raw *pb.Job_DataSource,
+	current *pb.Job_DataSource_Ref,
+) (*pb.Job_DataSource_Ref, error) {
+	source := raw.Source.(*pb.Job_DataSource_Git)
+
+	// Build our auth mechanism
+	auth, err := s.auth(log, ui, source)
+	if err != nil {
+		return nil, err
+	}
+
+	// Get our remote
+	remote := git.NewRemote(memory.NewStorage(), &config.RemoteConfig{
+		Name: "origin",
+		URLs: []string{source.Git.Url},
+	})
+
+	// Determine our target ref. If no Ref is specified by the user,
+	// we default to HEAD which points to whatever the default branch is.
+	targetRef := source.Git.Ref
+	if targetRef == "" {
+		targetRef = "HEAD"
+	}
+
+	// List our refs, equivalent to git ls-remote
+	refs, err := remote.List(&git.ListOptions{Auth: auth})
+	if err != nil {
+		return nil, err
+	}
+
+	// Build a map of our refs since we may have to do many lookups
+	refMap := map[plumbing.ReferenceName]*plumbing.Reference{}
+	for _, ref := range refs {
+		// We should never get a duplicate ref, but if we do, let's log it
+		// because this will PROBABLY result in some weird behavior.
+		if _, ok := refMap[ref.Name()]; ok {
+			log.Warn("duplicate ref in ls-remote, this shouldn't happen",
+				"name", ref.Name())
+		}
+
+		refMap[ref.Name()] = ref
+	}
+
+	// tryRefs is the list of refs we will try to find in the ref list.
+	// The first ref found that matches will be returned first. This contains
+	// all the formats a user may enter for a ref. The order at the time
+	// of writing is the following, where %s is replaced with the user-supplied
+	// ref. This is the same logic `git rev-parse` uses.
+	//
+	//  - "%s",
+	//  - "refs/%s",
+	//  - "refs/tags/%s",
+	//  - "refs/heads/%s",
+	//  - "refs/remotes/%s",
+	//  - "refs/remotes/%s/HEAD",
+	//
+	tryRefs := []string{targetRef}
+	for _, rule := range plumbing.RefRevParseRules {
+		tryRefs = append(tryRefs, fmt.Sprintf(rule, targetRef))
+	}
+	var foundRef *plumbing.Reference
+	for _, tryRef := range tryRefs {
+		ref, ok := refMap[plumbing.ReferenceName(tryRef)]
+		if !ok {
+			continue
+		}
+
+		// The limit prevents adversarial or buggy remote git repos that
+		// might have a symbolic reference loop. The value 10 was chosen
+		// arbitrarily, I've never seen a reference repeat more than 1 time.
+		limit := 10
+
+		// If the ref is a symbolic reference, we dereference until we find
+		// the target. An example here is HEAD may point to refs/heads/main,
+		// and so on.
+		for limit > 0 && ref != nil && ref.Type() == plumbing.SymbolicReference {
+			ref = refMap[ref.Target()]
+			limit--
+		}
+		if limit == 0 {
+			return nil, status.Errorf(codes.FailedPrecondition,
+				"Infinite reference in hash lookup for target: %s", targetRef)
+		}
+		if ref == nil {
+			continue
+		}
+
+		foundRef = ref
+		break
+	}
+
+	if foundRef == nil {
+		return nil, status.Errorf(codes.Internal, "Hash for target ref not found: %s", targetRef)
+	}
+
+	// Compare
+	if current != nil {
+		currentRef := current.Ref.(*pb.Job_DataSource_Ref_Git).Git
+		if currentRef.Commit == foundRef.Hash().String() {
+			log.Trace("current ref matches last known ref, ignoring")
+			return nil, nil
+		}
+	}
+
+	return &pb.Job_DataSource_Ref{
+		Ref: &pb.Job_DataSource_Ref_Git{
+			Git: &pb.Job_Git_Ref{
+				Commit: foundRef.Hash().String(),
+			},
+		},
+	}, nil
+}
+
+func (s *GitSource) auth(
+	log hclog.Logger,
+	ui terminal.UI,
+	source *pb.Job_DataSource_Git,
+) (transport.AuthMethod, error) {
+	switch authcfg := source.Git.Auth.(type) {
+	case *pb.Job_Git_Basic_:
+		ui.Output("Auth: username/password", terminal.WithInfoStyle())
+		return &http.BasicAuth{
+			Username: authcfg.Basic.Username,
+			Password: authcfg.Basic.Password,
+		}, nil
+
+	case *pb.Job_Git_Ssh:
+		// Default the user to "git" which is typically what is used.
+		user := authcfg.Ssh.User
+		if user == "" {
+			user = "git"
+		}
+
+		ui.Output("Auth: ssh", terminal.WithInfoStyle())
+		auth, err := ssh.NewPublicKeys(
+			user,
+			authcfg.Ssh.PrivateKeyPem,
+			authcfg.Ssh.Password,
+		)
+		if err != nil {
+			return nil, status.Errorf(codes.FailedPrecondition,
+				"Failed to load private key for Git auth: %s", err)
+		}
+
+		// We do not do any host key verification for now.
+		// NOTE(mitchellh): in the future we should expose a way to
+		// configure enabling this in some way.
+		auth.HostKeyCallback = cryptossh.InsecureIgnoreHostKey()
+
+		return auth, nil
+
+	case nil:
+		// Do nothing
+
+	default:
+		log.Warn("unknown auth configuration, ignoring: %T", source.Git.Auth)
+	}
+
+	return nil, nil
+}
+
 type gitConfig struct {
 	Url            string `hcl:"url,attr"`
 	Path           string `hcl:"path,optional"`
@@ -287,6 +444,7 @@ type gitConfig struct {
 	Password       string `hcl:"password,optional"`
 	SSHKey         string `hcl:"key,optional"`
 	SSHKeyPassword string `hcl:"key_password,optional"`
+	Ref            string `hcl:"ref,optional"`
 }
 
 var _ Sourcer = (*GitSource)(nil)

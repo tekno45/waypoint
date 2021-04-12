@@ -7,16 +7,17 @@ A short introduction of this app could easily go here.
 
 You will need the following things properly installed on your computer.
 
-- [Git](https://git-scm.com/)
-- [Node.js](https://nodejs.org/) (with npm)
+- [Node.js v12](https://nodejs.org/)
+  - The current codebase has been tested to run well with `node` version 12 so it is _**strongly recommended**_ that you use this version
+  - You can use node version managers to manage all of your node versions, for example [nvm](https://github.com/nvm-sh/nvm), [n](https://github.com/tj/n), etc.
+- [Yarn](https://classic.yarnpkg.com/en/docs/install)
 - [Ember CLI](https://ember-cli.com/)
 - [Google Chrome](https://google.com/chrome/)
 
 ## Installation
 
-- `git clone <repository-url>` this repository
-- `cd waypoint`
-- `npm install`
+- `cd waypoint/ui`
+- `yarn install`
 
 ## Running / Development
 
@@ -56,6 +57,14 @@ Then run the authentication steps above again.
 ### Generating Type Definitions after making api changes
 
 if you've made API changes in `/internal/server` and want to use those on the frontend, you'll need to generate the type definitions again: 
+
+#### Required dependencies for build step
+
+- MacOS only: `brew install gnu-sed` then follow the instructions to replace the default `sed`
+- Download [the 1.1.2 release of `mockery`](https://github.com/vektra/mockery/releases/tag/v1.1.2) and install in your `/go/bin` directory
+- install `ts-protoc-gen`: `yarn global add ts-protoc-gen` or `npm i -g ts-protoc-gen`
+
+#### Generate the API definitions
 
 - `go generate ./internal/server`
 - `make gen/ts`

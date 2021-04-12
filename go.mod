@@ -15,6 +15,7 @@ require (
 	github.com/bmatcuk/doublestar v1.1.5
 	github.com/boltdb/bolt v1.3.1
 	github.com/buildpacks/pack v0.11.1
+	github.com/cenkalti/backoff/v4 v4.0.2
 	github.com/certifi/gocertifi v0.0.0-20200922220541-2c3bb06c6054
 	github.com/containerd/console v1.0.1
 	github.com/creack/pty v1.1.11
@@ -25,10 +26,12 @@ require (
 	github.com/docker/docker v1.4.2-0.20200319182547-c7ad2b866182
 	github.com/docker/go-connections v0.4.0
 	github.com/docker/go-metrics v0.0.1 // indirect
+	github.com/docker/go-units v0.4.0
 	github.com/docker/libtrust v0.0.0-20160708172513-aabc10ec26b7 // indirect
 	github.com/dustin/go-humanize v1.0.0
 	github.com/elazarl/go-bindata-assetfs v1.0.1
 	github.com/fatih/color v1.9.0
+	github.com/ghodss/yaml v1.0.0
 	github.com/gliderlabs/ssh v0.3.1
 	github.com/go-git/go-git/v5 v5.2.0
 	github.com/go-openapi/runtime v0.19.15
@@ -42,7 +45,7 @@ require (
 	github.com/gorilla/handlers v1.4.2
 	github.com/hashicorp/aws-sdk-go-base v0.7.0
 	github.com/hashicorp/errwrap v1.0.0
-	github.com/hashicorp/go-argmapper v0.0.0-20200721221215-04ae500ede3b
+	github.com/hashicorp/go-argmapper v0.1.1
 	github.com/hashicorp/go-cleanhttp v0.5.1
 	github.com/hashicorp/go-gcp-common v0.6.0
 	github.com/hashicorp/go-getter v1.4.1
@@ -51,15 +54,15 @@ require (
 	github.com/hashicorp/go-multierror v1.1.0
 	github.com/hashicorp/go-plugin v1.3.0
 	github.com/hashicorp/go-uuid v1.0.2
+	github.com/hashicorp/go-version v1.2.0
 	github.com/hashicorp/golang-lru v0.5.4 // indirect
 	github.com/hashicorp/hcl/v2 v2.7.1-0.20201023000745-3de61ecba298
-	github.com/hashicorp/horizon v0.0.0-20201203173320-fcefbe49771c
+	github.com/hashicorp/horizon v0.0.0-20210317214650-d2053943be04
 	github.com/hashicorp/nomad/api v0.0.0-20200814140818-42de70466a9d
 	github.com/hashicorp/vault/api v1.0.5-0.20200519221902-385fac77e20f
 	github.com/hashicorp/vault/sdk v0.1.14-0.20201202172114-ee5ebeb30fef
 	github.com/hashicorp/waypoint-hzn v0.0.0-20201008221232-97cd4d9120b9
-	github.com/hashicorp/waypoint-plugin-sdk v0.0.0-20210217205040-c3ed2e9c4f02
-	github.com/hashicorp/yamux v0.0.0-20200609203250-aecfd211c9ce // indirect
+	github.com/hashicorp/waypoint-plugin-sdk v0.0.0-20210319163606-c48e1a6cba30
 	github.com/imdario/mergo v0.3.11
 	github.com/improbable-eng/grpc-web v0.13.0
 	github.com/kevinburke/go-bindata v3.22.0+incompatible
@@ -106,7 +109,7 @@ require (
 	google.golang.org/grpc v1.32.0
 	google.golang.org/protobuf v1.25.0
 	gopkg.in/go-playground/assert.v1 v1.2.1 // indirect
-	gopkg.in/yaml.v2 v2.3.0
+	gopkg.in/yaml.v2 v2.3.0 // indirect
 	k8s.io/api v0.19.4
 	k8s.io/apimachinery v0.19.4
 	k8s.io/client-go v0.19.4

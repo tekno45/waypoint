@@ -407,6 +407,7 @@ func (p *Platform) SetupExecutionRole(ctx context.Context, s LifecycleStatus, L 
 	// role names have to be 64 characters or less, and the client side doesn't validate this.
 	if len(roleName) > 64 {
 		roleName = roleName[:64]
+		L.Debug("using a shortened value for role name due to AWS's length limits", "roleName", roleName)
 	}
 
 	// p.updateStatus("setting up IAM role")
@@ -766,7 +767,7 @@ func createALB(
 		records, err := r53.ListResourceRecordSets(&route53.ListResourceRecordSetsInput{
 			HostedZoneId:    aws.String(albConfig.ZoneId),
 			StartRecordName: aws.String(albConfig.FQDN),
-			StartRecordType: aws.String("A"),
+			StartRecordType: aws.String(route53.RRTypeA),
 			MaxItems:        aws.String("1"),
 		})
 		if err != nil {
@@ -775,14 +776,23 @@ func createALB(
 
 		fqdn := albConfig.FQDN
 
+		// Add trailing period to match Route53 record name
 		if fqdn[len(fqdn)-1] != '.' {
 			fqdn += "."
 		}
 
-		if len(records.ResourceRecordSets) > 0 && *(records.ResourceRecordSets[0].Name) == fqdn {
-			s.Status("Found existing Route53 record: %s", *records.ResourceRecordSets[0].Name)
-			L.Debug("found existing record, assuming it's correct")
-		} else {
+		var recordExists bool
+
+		if len(records.ResourceRecordSets) > 0 {
+			record := records.ResourceRecordSets[0]
+			if aws.StringValue(record.Type) == route53.RRTypeA && aws.StringValue(record.Name) == fqdn {
+				s.Status("Found existing Route53 record: %s", aws.StringValue(record.Name))
+				L.Debug("found existing record, assuming it's correct")
+				recordExists = true
+			}
+		}
+
+		if !recordExists {
 			s.Status("Creating new Route53 record: %s (zone-id: %s)",
 				albConfig.FQDN, albConfig.ZoneId)
 
@@ -791,10 +801,10 @@ func createALB(
 				ChangeBatch: &route53.ChangeBatch{
 					Changes: []*route53.Change{
 						{
-							Action: aws.String("CREATE"),
+							Action: aws.String(route53.ChangeActionCreate),
 							ResourceRecordSet: &route53.ResourceRecordSet{
 								Name: aws.String(albConfig.FQDN),
-								Type: aws.String("A"),
+								Type: aws.String(route53.RRTypeA),
 								AliasTarget: &route53.AliasTarget{
 									DNSName:              lb.DNSName,
 									EvaluateTargetHealth: aws.Bool(true),
@@ -824,26 +834,35 @@ func createALB(
 	return lbArn, tgArn, err
 }
 
-func buildLoggingOptions(conf *Logging, region string, logGroup string, defaultStreamPrefix string) map[string]*string {
-
-	var streamPrefix = conf.StreamPrefix
-	if streamPrefix == "" {
-		streamPrefix = defaultStreamPrefix
-	}
+func buildLoggingOptions(
+	lo *Logging,
+	region string,
+	logGroup string,
+	defaultStreamPrefix string,
+) map[string]*string {
 
 	result := map[string]*string{
-		"awslogs-region":            aws.String(region),
-		"awslogs-group":             aws.String(logGroup),
-		"awslogs-endpoint":          aws.String(conf.Endpoint),
-		"awslogs-stream-prefix":     aws.String(streamPrefix),
-		"awslogs-datetime-format":   aws.String(conf.DateTimeFormat),
-		"awslogs-multiline-pattern": aws.String(conf.MultilinePattern),
-		"mode":                      aws.String(conf.Mode),
-		"max-buffer-size":           aws.String(conf.MaxBufferSize),
+		"awslogs-region":        aws.String(region),
+		"awslogs-group":         aws.String(logGroup),
+		"awslogs-stream-prefix": aws.String(defaultStreamPrefix),
 	}
 
-	if conf.CreateGroup {
-		result["awslogs-create-group"] = aws.String("true")
+	if lo != nil {
+		// We receive the error `Log driver awslogs disallows options: awslogs-endpoint`
+		// when setting `awslogs-endpoint`, so that is not included here of the
+		// available options
+		// https://docs.aws.amazon.com/AmazonECS/latest/developerguide/using_awslogs.html
+		result["awslogs-datetime-format"] = aws.String(lo.DateTimeFormat)
+		result["awslogs-multiline-pattern"] = aws.String(lo.MultilinePattern)
+		result["mode"] = aws.String(lo.Mode)
+		result["max-buffer-size"] = aws.String(lo.MaxBufferSize)
+
+		if lo.CreateGroup {
+			result["awslogs-create-group"] = aws.String("true")
+		}
+		if lo.StreamPrefix != "" {
+			result["awslogs-stream-prefix"] = aws.String(lo.StreamPrefix)
+		}
 	}
 
 	for k, v := range result {
@@ -904,7 +923,12 @@ func (p *Platform) Launch(
 		})
 	}
 
-	logOptions := buildLoggingOptions(p.config.Logging, p.config.Region, logGroup, defaultStreamPrefix)
+	logOptions := buildLoggingOptions(
+		p.config.Logging,
+		p.config.Region,
+		logGroup,
+		defaultStreamPrefix,
+	)
 
 	def := ecs.ContainerDefinition{
 		Essential: aws.Bool(true),
@@ -1074,6 +1098,7 @@ func (p *Platform) Launch(
 	// requires that the name is 32 characters or less.
 	if len(serviceName) > 32 {
 		serviceName = serviceName[:32]
+		L.Debug("using a shortened value for service name due to AWS's length limits", "serviceName", serviceName)
 	}
 
 	taskArn := *taskOut.TaskDefinition.TaskDefinitionArn
@@ -1358,8 +1383,6 @@ type HealthCheckConfig struct {
 type Logging struct {
 	CreateGroup bool `hcl:"create_group,optional"`
 
-	Endpoint string `hcl:"endpoint,optional"`
-
 	StreamPrefix string `hcl:"stream_prefix,optional"`
 
 	DateTimeFormat string `hcl:"datetime_format,optional"`
@@ -1597,51 +1620,49 @@ deploy {
 
 	doc.SetField(
 		"logging",
-		"Provides additional configuration for logging flags for ECS.",
-		docs.Summary("Part of the ecs task definition.  These configuration flags help",
+		"Provides additional configuration for logging flags for ECS",
+		docs.Summary(
+			"Part of the ecs task definition.  These configuration flags help",
 			"control how the awslogs log driver is configured."),
-	)
 
-	doc.SetField(
-		"logging.create_group",
-		"Should the task attempt to create the aws logs group if not present?",
-	)
+		docs.SubFields(func(doc *docs.SubFieldDoc) {
+			doc.SetField(
+				"create_group",
+				"Enables creation of the aws logs group if not present",
+			)
 
-	doc.SetField(
-		"logging.region",
-		"The region the logs are to be shipped to.",
-		docs.Default("The same region the task is to be running."),
-	)
+			doc.SetField(
+				"region",
+				"The region the logs are to be shipped to",
+				docs.Default("The same region the task is to be running"),
+			)
 
-	doc.SetField(
-		"logging.endpoint",
-		"Override the endpoint the logs are shipped to",
-	)
+			doc.SetField(
+				"stream_prefix",
+				"Prefix for application in cloudwatch logs path",
+				docs.Default("Generated based off timestamp"),
+			)
 
-	doc.SetField(
-		"logging.stream_prefix",
-		"prefix for application in cloudwatch logs path",
-		docs.Default("Generated based off timestamp"),
-	)
+			doc.SetField(
+				"datetime_format",
+				"Defines the multiline start pattern in Python strftime format",
+			)
 
-	doc.SetField(
-		"logging.datetime_format",
-		"Defines the multiline start pattern in Python strftime format",
-	)
+			doc.SetField(
+				"multiline_pattern",
+				"Defines the multiline start pattern using a regular expression",
+			)
 
-	doc.SetField(
-		"logging.multiline_pattern",
-		"Defines the multiline start pattern using a regular expression",
-	)
+			doc.SetField(
+				"mode",
+				"Delivery method for log messages, either 'blocking' or 'non-blocking'",
+			)
 
-	doc.SetField(
-		"logging.mode",
-		"Delivery method for log messages, either 'blocking' or 'non-blocking'",
-	)
-
-	doc.SetField(
-		"logging.max_buffer_size",
-		"When using non-blocking logging mode, this is the buffer size for message storage",
+			doc.SetField(
+				"max_buffer_size",
+				"When using non-blocking logging mode, this is the buffer size for message storage",
+			)
+		}),
 	)
 
 	doc.SetField(

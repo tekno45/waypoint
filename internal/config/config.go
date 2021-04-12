@@ -21,7 +21,7 @@ type Config struct {
 }
 
 type hclConfig struct {
-	Project string            `hcl:"project,attr"`
+	Project string            `hcl:"project,optional"`
 	Runner  *Runner           `hcl:"runner,block" default:"{}"`
 	Labels  map[string]string `hcl:"labels,optional"`
 	Plugin  []*Plugin         `hcl:"plugin,block"`
@@ -38,12 +38,21 @@ type Runner struct {
 
 	// DataSource is the default data source when a remote job is queued.
 	DataSource *DataSource `hcl:"data_source,block"`
+
+	// Poll are the settings related to polling.
+	Poll *Poll `hcl:"poll,block"`
 }
 
 // DataSource configures the data source for the runner.
 type DataSource struct {
 	Type string   `hcl:",label"`
 	Body hcl.Body `hcl:",remain"`
+}
+
+// Poll configures the polling settings for a project.
+type Poll struct {
+	Enabled  bool   `hcl:"enabled,optional"`
+	Interval string `hcl:"interval,optional"`
 }
 
 // Load loads the configuration file from the given path.

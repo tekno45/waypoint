@@ -1,7 +1,6 @@
 ---
 layout: docs
 page_title: Application Lifecycle
-sidebar_title: Lifecycle
 description: |-
   Waypoint has an opinionated view on the minimum application lifecycle: build, deploy, and release. These are the core elements that Waypoint orchestrates during a `waypoint up`.
 ---
@@ -11,6 +10,11 @@ description: |-
 Waypoint has an opinionated view on the minimum application lifecycle:
 build, deploy, and release. These are the core elements that Waypoint
 orchestrates during a `waypoint up`.
+
+**Each stage in Waypoint is optional.** Waypoint doesn't need to own or run
+each stage. For example, your builds may happen in CI using other tools.
+Waypoint can use the result of that build to perform only the "deploy"
+and "release" steps. Any combination can be mixed.
 
 These stages can also be broken down to the individual commands
 `waypoint build`, `waypoint deploy`, and `waypoint release`. This allows
@@ -31,7 +35,7 @@ into the Waypoint workflow.
 - A **release** activates a previously staged _deployment_ and opens it
   to general traffic.
 
-## History
+## Operation History
 
 Waypoint maintains a history of all operations. You can view this history
 in the UI as well as the CLI. The operation history shows when it was

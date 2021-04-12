@@ -12,8 +12,9 @@ import (
 	"google.golang.org/grpc/status"
 
 	"github.com/hashicorp/waypoint/internal/ceb"
-	"github.com/hashicorp/waypoint/internal/ceb/ssh"
+	cebssh "github.com/hashicorp/waypoint/internal/ceb/ssh"
 	"github.com/hashicorp/waypoint/internal/pkg/signalcontext"
+	ssh "github.com/hashicorp/waypoint/internal/ssh"
 )
 
 func main() {
@@ -58,7 +59,7 @@ func realMain() int {
 		// are communicating with the party they expect to be.
 
 		// Run our core logic
-		err = ssh.RunExecSSHServer(ctx, log, port, hostKey, userKey)
+		err = cebssh.RunExecSSHServer(ctx, log, port, hostKey, userKey)
 		if err != nil {
 			fmt.Fprintf(flag.CommandLine.Output(),
 				"Error initializing Waypoint entrypoint: %s\n", formatError(err))
@@ -72,6 +73,9 @@ func realMain() int {
 		usage()
 		return 1
 	}
+
+	// Start our debug signal handler
+	go debugSignalHandler(ctx, log.Named("debug"))
 
 	// Run our core logic
 	err := ceb.Run(ctx,

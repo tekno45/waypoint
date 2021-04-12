@@ -51,6 +51,13 @@ func (r *Releaser) Release(
 		lbName = "waypoint-" + src.App
 	}
 
+	// We have to clamp at a length of 32 because the Name field to 
+	// CreateLoadBalancer requires that the name is 32 characters or less.
+	if len(lbName) > 32 {
+		lbName = lbName[:32]
+		log.Debug("using a shortened value for load balancer name due to AWS's length limits", "lbName", lbName)
+	}
+
 	var (
 		certs    []*elbv2.Certificate
 		protocol string = "HTTP"
@@ -63,6 +70,11 @@ func (r *Releaser) Release(
 		certs = append(certs, &elbv2.Certificate{
 			CertificateArn: &r.config.CertificateId,
 		})
+	}
+
+	// If there is a port defined, honor it.
+	if r.config.Port != 0 {
+		port = int64(r.config.Port)
 	}
 
 	var (
@@ -147,7 +159,7 @@ func (r *Releaser) Release(
 				vpc = subnetInfo.Subnets[0].VpcId
 			}
 
-			sg, err := utils.CreateSecurityGroup(ctx, sess, fmt.Sprintf("%s-incoming", lbName), vpc, r.config.Port)
+			sg, err := utils.CreateSecurityGroup(ctx, sess, fmt.Sprintf("%s-incoming", lbName), vpc, int(port))
 			if err != nil {
 				return nil, err
 			}
@@ -333,6 +345,12 @@ func (r *Releaser) Documentation() (*docs.Documentation, error) {
 		"ec2.Deployment",
 		"alb.TargetGroup",
 		"Allow EC2 Deployments to be hooked up to an ALB",
+	)
+
+	doc.AddMapper(
+		"lambda.Deployment",
+		"alb.TargetGroup",
+		"Allow Lambda Deployments to be hooked up to an ALB",
 	)
 
 	doc.SetField(

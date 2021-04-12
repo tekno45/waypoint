@@ -18,7 +18,7 @@ import (
 	"github.com/hashicorp/waypoint-plugin-sdk/component"
 	"github.com/hashicorp/waypoint-plugin-sdk/terminal"
 	"github.com/hashicorp/waypoint/builtin/aws/utils"
-	"github.com/hashicorp/waypoint/internal/ceb/ssh"
+	"github.com/hashicorp/waypoint/internal/ssh"
 )
 
 // This launches an ECS task to run the given image. It creates an ECS cluster configured
@@ -97,6 +97,7 @@ func (e *ecsLauncher) SetupRole(L hclog.Logger, sess *session.Session, log hclog
 	// role names have to be 64 characters or less, and the client side doesn't validate this.
 	if len(e.roleName) > 64 {
 		e.roleName = e.roleName[:64]
+		L.Debug("using a shortened value for role name due to AWS's length limits", "roleName", e.roleName)
 	}
 
 	log.Info("setting up IAM role")

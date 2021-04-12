@@ -3,7 +3,7 @@ version: 2.1
 
 references:
   images:
-    go: &GOLANG_IMAGE docker.mirror.hashicorp.services/circleci/golang:1.15.3
+    go: &GOLANG_IMAGE docker.mirror.hashicorp.services/circleci/golang:1.16
     middleman: &MIDDLEMAN_IMAGE docker.mirror.hashicorp.services/hashicorp/middleman-hashicorp:0.3.44
     ember: &EMBER_IMAGE docker.mirror.hashicorp.services/circleci/node:12-browsers
 
@@ -167,6 +167,26 @@ jobs:
             - waypoint
       - notify_main_failure
 
+  # create a development build for Windows. This is used to verify
+  # Windows builds work.
+  dev-build-windows:
+    docker:
+      - image: *GOLANG_IMAGE
+    environment:
+      <<: *ENVIRONMENT
+    steps:
+      - add_ssh_keys:
+          fingerprints:
+            - "c6:96:98:82:dc:04:6c:39:dd:ac:83:05:e3:15:1c:98"
+      - checkout
+      - attach_workspace:
+          at: .
+      - run:
+          command: |
+            go get github.com/kevinburke/go-bindata/...
+            PATH=/go/bin:$PATH make bin/windows
+      - notify_main_failure
+
   integration:
     machine:
       image: circleci/classic:201808-01
@@ -192,6 +212,7 @@ jobs:
     docker:
       # Use a modern Circle image as we just need up-to-date Docker here
       - image: docker.mirror.hashicorp.services/cimg/base:2020.07-20.04
+    resource_class: medium+
     environment:
       <<: *ENVIRONMENT
     shell: /usr/bin/env bash -euo pipefail -c
@@ -342,7 +363,7 @@ jobs:
               echo "no UI changes so no static assets to publish"
             fi
       - notify_main_failure
-  
+
   algolia-index:
     docker:
       - image: docker.mirror.hashicorp.services/node:12
@@ -400,6 +421,13 @@ workflows:
           requires:
             - lint
       - dev-build:
+          requires:
+            - lint
+          filters:
+            branches:
+              ignore:
+                - main
+      - dev-build-windows:
           requires:
             - lint
           filters:

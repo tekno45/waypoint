@@ -30,4 +30,9 @@ Usage: `waypoint up [options]`
   unless 'runner.default' is set in your configuration.
 - `-remote-source=<key=value>` - Override configurations for how remote runners source data. This is specified to the data source type being used in your configuration. This is used for example to set a specific Git ref to run against.
 
+#### Command Options
+
+- `-prune` - Prune old unreleased deployments.
+- `-prune-retain=<int>` - The number of unreleased deployments to keep. If this isn't set or is set to any negative number, then this will default to 1 on the server. If you want to prune all unreleased deployments, set this to 0.
+
 @include "commands/up_more.mdx"

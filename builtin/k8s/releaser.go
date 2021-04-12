@@ -132,15 +132,30 @@ func (r *Releaser) Release(
 			port = DefaultPort
 		}
 
+		var target_port int
 		if sp["target_port"] == "" {
 			sp["target_port"] = "http"
+		} else {
+			target_port, err = strconv.Atoi(sp["target_port"])
+			if err != nil {
+				// it's a string label like 'http', not an integer
+				target_port = 0
+			}
 		}
 
 		servicePorts[i] = corev1.ServicePort{
-			Port:       int32(port),
-			TargetPort: intstr.FromString(sp["target_port"]),
-			Protocol:   corev1.ProtocolTCP,
-			NodePort:   int32(nodePort),
+			Name:     sp["name"],
+			Port:     int32(port),
+			Protocol: corev1.ProtocolTCP,
+			NodePort: int32(nodePort),
+		}
+
+		// Because of the type TargetPort is expected to be, we can't pass along
+		// an int as a string, it expects the int to actually be an int
+		if target_port != 0 {
+			servicePorts[i].TargetPort = intstr.FromInt(target_port)
+		} else {
+			servicePorts[i].TargetPort = intstr.FromString(sp["target_port"])
 		}
 	}
 
@@ -331,10 +346,11 @@ func (r *Releaser) Documentation() (*docs.Documentation, error) {
 		"a map of ports and options that the application is listening on",
 		docs.Summary(
 			"used to define and configure multiple ports that the application is",
-			"listening on. Available keys are 'port', 'node_port', and 'target_port'.",
+			"listening on. Available keys are 'port', 'node_port', 'name', and 'target_port'.",
 			"If 'node_port' is set but 'load_balancer' is not, the service will be",
 			" NodePort type. If 'load_balancer' is also set, it will be LoadBalancer.",
 			"Ports defined will be TCP protocol.",
+			"Note that 'name' is required if defining more than one port.",
 		),
 	)
 

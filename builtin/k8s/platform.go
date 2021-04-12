@@ -182,6 +182,14 @@ func (p *Platform) Deploy(
 	// Set our ID on the label. We use this ID so that we can have a key
 	// to route to multiple versions during release management.
 	deployment.Spec.Template.Labels[labelId] = result.Id
+	// Version label duplicates "labelId" to support services like Istio that
+	// expect pods to be labled with 'version'
+	deployment.Spec.Template.Labels["version"] = result.Id
+
+	// Apply user defined labels
+	for k, v := range p.config.Labels {
+		deployment.Spec.Template.Labels[k] = v
+	}
 
 	// If the user is using the latest tag, then don't specify an overriding pull policy.
 	// This by default means kubernetes will always pull so that latest is useful.
@@ -240,6 +248,21 @@ func (p *Platform) Deploy(
 	// assume the first port defined is the 'main' port to use
 	defaultPort := int(containerPorts[0].ContainerPort)
 
+	initialDelaySeconds := int32(5)
+	timeoutSeconds := int32(5)
+	failureThreshold := int32(5)
+	if p.config.Probe != nil {
+		if p.config.Probe.InitialDelaySeconds != 0 {
+			initialDelaySeconds = int32(p.config.Probe.InitialDelaySeconds)
+		}
+		if p.config.Probe.TimeoutSeconds != 0 {
+			timeoutSeconds = int32(p.config.Probe.TimeoutSeconds)
+		}
+		if p.config.Probe.FailureThreshold != 0 {
+			failureThreshold = int32(p.config.Probe.FailureThreshold)
+		}
+	}
+
 	// Update the deployment with our spec
 	deployment.Spec.Template.Spec = corev1.PodSpec{
 		Containers: []corev1.Container{
@@ -254,9 +277,9 @@ func (p *Platform) Deploy(
 							Port: intstr.FromInt(defaultPort),
 						},
 					},
-					InitialDelaySeconds: 5,
-					TimeoutSeconds:      5,
-					FailureThreshold:    5,
+					InitialDelaySeconds: initialDelaySeconds,
+					TimeoutSeconds:      timeoutSeconds,
+					FailureThreshold:    failureThreshold,
 				},
 				ReadinessProbe: &corev1.Probe{
 					Handler: corev1.Handler{
@@ -264,8 +287,8 @@ func (p *Platform) Deploy(
 							Port: intstr.FromInt(defaultPort),
 						},
 					},
-					InitialDelaySeconds: 5,
-					TimeoutSeconds:      5,
+					InitialDelaySeconds: initialDelaySeconds,
+					TimeoutSeconds:      timeoutSeconds,
 				},
 				Env:       env,
 				Resources: resourceRequirements,
@@ -282,9 +305,9 @@ func (p *Platform) Deploy(
 					Port: intstr.FromInt(defaultPort),
 				},
 			},
-			InitialDelaySeconds: 5,
-			TimeoutSeconds:      5,
-			FailureThreshold:    5,
+			InitialDelaySeconds: initialDelaySeconds,
+			TimeoutSeconds:      timeoutSeconds,
+			FailureThreshold:    failureThreshold,
 		}
 
 		deployment.Spec.Template.Spec.Containers[0].ReadinessProbe = &corev1.Probe{
@@ -294,8 +317,8 @@ func (p *Platform) Deploy(
 					Port: intstr.FromInt(defaultPort),
 				},
 			},
-			InitialDelaySeconds: 5,
-			TimeoutSeconds:      5,
+			InitialDelaySeconds: initialDelaySeconds,
+			TimeoutSeconds:      timeoutSeconds,
 		}
 	}
 
@@ -429,7 +452,9 @@ func (p *Platform) Deploy(
 				}
 
 				if cs.State.Waiting != nil {
-					if cs.State.Waiting.Reason == "ImagePullBackOff" {
+					// TODO: handle other pod failures here
+					if cs.State.Waiting.Reason == "ImagePullBackOff" ||
+						cs.State.Waiting.Reason == "ErrImagePull" {
 						detectedError = "Pod unable to access Docker image"
 						k8error = cs.State.Waiting.Message
 					}
@@ -438,17 +463,15 @@ func (p *Platform) Deploy(
 		}
 
 		if detectedError != "" && !reportedError {
-			step.Update("Detected pods having an issue starting - %s: %s", detectedError, k8error)
-			step.Status(terminal.StatusWarn)
+			// we use ui output here instead of a step group, otherwise the warning
+			// gets swallowed up on the next poll iteration
+			ui.Output("Detected pods having an issue starting - %s: %s",
+				detectedError, k8error, terminal.WithWarningStyle())
 			reportedError = true
 
 			// force a faster rerender
 			lastStatus = time.Time{}
 		}
-
-		// TODO: Report the statuses and events of the pods that are starting
-		// here so that users know why stuff isn't starting. Most commonly here
-		// it's going to be an error pulling the image.
 
 		return false, nil
 	})
@@ -524,6 +547,9 @@ type Config struct {
 	// blank then we default to the home directory.
 	KubeconfigPath string `hcl:"kubeconfig,optional"`
 
+	// A map of key vals to label the deployed Pod and Deployment with.
+	Labels map[string]string `hcl:"labels,optional"`
+
 	// Namespace is the Kubernetes namespace to target the deployment to.
 	Namespace string `hcl:"namespace,optional"`
 
@@ -535,6 +561,9 @@ type Config struct {
 	// is up and running. Without this, we only test that a connection can be
 	// made to the port.
 	ProbePath string `hcl:"probe_path,optional"`
+
+	// Probe details for describing a health check to be performed against a container.
+	Probe *Probe `hcl:"probe,block"`
 
 	// Optionally define various resources limits for kubernetes pod containers
 	// such as memory and cpu.
@@ -558,6 +587,23 @@ type Config struct {
 	// selected via environment variable. Most configuration should use the waypoint
 	// config commands.
 	StaticEnvVars map[string]string `hcl:"static_environment,optional"`
+}
+
+// Probe describes a health check to be performed against a container to determine whether it is
+// alive or ready to receive traffic.
+type Probe struct {
+	// Time in seconds to wait before performing the initial liveness and readiness probes.
+	// Defaults to 5 seconds.
+	InitialDelaySeconds uint `hcl:"initial_delay,optional"`
+
+	// Time in seconds before the probe fails.
+	// Defaults to 5 seconds.
+	TimeoutSeconds uint `hcl:"timeout,optional"`
+
+	// Number of times a liveness probe can fail before the container is killed.
+	// FailureThreshold * TimeoutSeconds should be long enough to cover your worst
+	// case startup times. Defaults to 5 failures.
+	FailureThreshold uint `hcl:"failure_threshold,optional"`
 }
 
 func (p *Platform) Documentation() (*docs.Documentation, error) {
@@ -602,7 +648,7 @@ deploy "kubernetes" {
 		"a map of resource limits and requests to apply to a pod on deploy",
 		docs.Summary(
 			"resource limits and requests for a pod. limits and requests options "+
-				"must start with either 'limits_' or 'requests_'. Any other options "+
+				"must start with either 'limits\\_' or 'requests\\_'. Any other options "+
 				"will be ignored.",
 		),
 	)
@@ -623,6 +669,36 @@ deploy "kubernetes" {
 		docs.Summary(
 			"without this, the test will simply be that the application has bound to the port",
 		),
+	)
+
+	doc.SetField(
+		"probe",
+		"configuration to control liveness and readiness probes",
+		docs.Summary("Probe describes a health check to be performed against a ",
+			"container to determine whether it is alive or ready to receive traffic."),
+		docs.SubFields(func(doc *docs.SubFieldDoc) {
+			doc.SetField(
+				"initial_delay",
+				"time in seconds to wait before performing the initial liveness and readiness probes",
+				docs.Default("5"),
+			)
+
+			doc.SetField(
+				"timeout",
+				"time in seconds before the probe fails",
+				docs.Default("5"),
+			)
+
+			doc.SetField(
+				"failure_threshold",
+				"number of times a liveness probe can fail before the container is killed",
+				docs.Summary(
+					"failureThreshold * TimeoutSeconds should be long enough to cover your worst case startup times",
+				),
+				docs.Default("5"),
+			)
+
+		}),
 	)
 
 	doc.SetField(
@@ -679,6 +755,11 @@ deploy "kubernetes" {
 			"service account is the name of the Kubernetes service account to add to the pod.",
 			"This is useful to apply Kubernetes RBAC to the application.",
 		),
+	)
+
+	doc.SetField(
+		"labels",
+		"a map of key value labels to apply to the deployment pod",
 	)
 
 	doc.SetField(

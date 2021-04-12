@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/hashicorp/go-hclog"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
@@ -23,14 +24,29 @@ var heartbeatDuration = 5 * time.Second
 func (r *Runner) AcceptMany(ctx context.Context) {
 	for {
 		if err := r.Accept(ctx); err != nil {
-			switch {
-			case err == ErrClosed:
+			if err == ErrClosed {
 				return
-			case status.Code(err) == codes.Canceled:
+			}
+
+			switch status.Code(err) {
+			case codes.Canceled:
 				// Ideally we'd get ErrClosed, but there are cases where we'll observe
 				// the context being closed first, in which case we honor that as a valid
 				// reason to stop accepting jobs.
 				return
+
+			case codes.NotFound:
+				// This means the runner was deregistered and we must exit.
+				// This won't be fixed unless the runner is closed and restarted.
+				r.logger.Error("runner unexpectedly deregistered, exiting")
+				return
+
+			case codes.Unavailable:
+				// Server became unavailable. Let's just sleep to give the
+				// server time to come back.
+				r.logger.Warn("server unavailable, sleeping before retry")
+				time.Sleep(2 * time.Second)
+
 			default:
 				r.logger.Error("error running job", "error", err)
 			}
@@ -44,6 +60,14 @@ func (r *Runner) AcceptMany(ctx context.Context) {
 // An error is only returned if there was an error internal to the runner.
 // Errors during job execution are expected (i.e. a project build is misconfigured)
 // and will be reported on the job.
+//
+// Two specific errors to watch out for are:
+//
+//   - ErrClosed (in this package) which means that the runner is closed
+//     and Accept can no longer be called.
+//   - code = NotFound which means that the runner was deregistered. This
+//     means the runner has to be fully recycled: Close called, a new runner
+//     started.
 //
 // This is safe to be called concurrently which can be used to execute
 // multiple jobs in parallel as a runner.
@@ -112,7 +136,10 @@ func (r *Runner) accept(ctx context.Context, id string) error {
 			"expected job assignment, server sent %T",
 			resp.Event)
 	}
-	log = log.With("job_id", assignment.Assignment.Job.Id)
+	log = log.With(
+		"job_id", assignment.Assignment.Job.Id,
+		"job_op", fmt.Sprintf("%T", assignment.Assignment.Job.Operation),
+	)
 	log.Info("job assignment received")
 
 	// Used to test the behavior of accepting a job while
@@ -243,61 +270,15 @@ func (r *Runner) accept(ctx context.Context, id string) error {
 		}
 	}()
 
-	// We need to get our data source next prior to executing.
-	var result *pb.Job_Result
-	wd, ref, closer, err := r.downloadJobData(
-		ctx,
-		log,
-		ui,
-		assignment.Assignment.Job.DataSource,
-		assignment.Assignment.Job.DataSourceOverrides,
-	)
-	if err == nil {
-		log.Debug("job data downloaded (or local)",
-			"pwd", wd,
-			"ref", fmt.Sprintf("%#v", ref),
-		)
+	// The job stream setup is done. Actually run the job, download any
+	// data necessary, setup the core, etc
+	log.Info("starting job execution")
+	result, err := r.prepareAndExecuteJob(ctx, log, ui, &sendMutex, client, assignment.Assignment.Job)
+	log.Debug("job finished", "error", err)
 
-		if closer != nil {
-			defer func() {
-				log.Debug("cleaning up downloaded data")
-				if err := closer(); err != nil {
-					log.Warn("error cleaning up data", "err", err)
-				}
-			}()
-		}
-
-		// Send our download info
-		if ref != nil {
-			log.Debug("sending download event")
-
-			sendMutex.Lock()
-			err = client.Send(&pb.RunnerJobStreamRequest{
-				Event: &pb.RunnerJobStreamRequest_Download{
-					Download: &pb.GetJobStreamResponse_Download{
-						DataSourceRef: ref,
-					},
-				},
-			})
-			sendMutex.Unlock()
-		}
-
-		// We want the working directory to always be absolute.
-		if err == nil && !filepath.IsAbs(wd) {
-			err = status.Errorf(codes.Internal,
-				"data working directory should be absolute. This is a bug, please report it.")
-		}
-
-		if err == nil {
-			// Execute the job. We have to close the UI right afterwards to
-			// ensure that no more output is writting to the client.
-			log.Info("starting job execution")
-			result, err = r.executeJob(ctx, log, ui, assignment.Assignment.Job, wd)
-			if ui, ok := ui.(*runnerUI); ok {
-				ui.Close()
-			}
-			log.Debug("job finished", "error", err)
-		}
+	// We won't output anything else to the UI anymore.
+	if ui, ok := ui.(*runnerUI); ok {
+		ui.Close()
 	}
 
 	// Check if we were force canceled. If so, then just exit now. Realistically
@@ -359,4 +340,73 @@ func (r *Runner) accept(ctx context.Context, id string) error {
 	}
 
 	return err
+}
+
+func (r *Runner) prepareAndExecuteJob(
+	ctx context.Context,
+	log hclog.Logger,
+	ui terminal.UI,
+	sendMutex *sync.Mutex,
+	client pb.Waypoint_RunnerJobStreamClient,
+	job *pb.Job,
+) (*pb.Job_Result, error) {
+	// Some operation types don't need to download data, execute those here.
+	switch job.Operation.(type) {
+	case *pb.Job_Poll:
+		return r.executePollOp(ctx, log, ui, job)
+	}
+
+	// We need to get our data source next prior to executing.
+	var result *pb.Job_Result
+	wd, ref, closer, err := r.downloadJobData(
+		ctx,
+		log,
+		ui,
+		job.DataSource,
+		job.DataSourceOverrides,
+	)
+	if err == nil {
+		log.Debug("job data downloaded (or local)",
+			"pwd", wd,
+			"ref", fmt.Sprintf("%#v", ref),
+		)
+
+		if closer != nil {
+			defer func() {
+				log.Debug("cleaning up downloaded data")
+				if err := closer(); err != nil {
+					log.Warn("error cleaning up data", "err", err)
+				}
+			}()
+		}
+
+		// Send our download info
+		if ref != nil {
+			log.Debug("sending download event")
+
+			sendMutex.Lock()
+			err = client.Send(&pb.RunnerJobStreamRequest{
+				Event: &pb.RunnerJobStreamRequest_Download{
+					Download: &pb.GetJobStreamResponse_Download{
+						DataSourceRef: ref,
+					},
+				},
+			})
+			sendMutex.Unlock()
+		}
+
+		// We want the working directory to always be absolute.
+		if err == nil && !filepath.IsAbs(wd) {
+			err = status.Errorf(codes.Internal,
+				"data working directory should be absolute. This is a bug, please report it.")
+		}
+
+		if err == nil {
+			// Execute the job. We have to close the UI right afterwards to
+			// ensure that no more output is writting to the client.
+			result, err = r.executeJob(ctx, log, ui, job, wd)
+		}
+	}
+
+	return result, err
 }

@@ -22,7 +22,7 @@ import (
 	"github.com/hashicorp/go-hclog"
 	"github.com/hashicorp/waypoint/builtin/aws/ecr"
 	"github.com/hashicorp/waypoint/builtin/aws/utils"
-	cebssh "github.com/hashicorp/waypoint/internal/ceb/ssh"
+	wpssh "github.com/hashicorp/waypoint/internal/ssh"
 	"github.com/pkg/errors"
 
 	"github.com/hashicorp/waypoint-plugin-sdk/component"
@@ -288,27 +288,45 @@ func (p *Platform) Deploy(
 	} else {
 		step.Update("Creating new Lambda function")
 
-		funcOut, err := lamSvc.CreateFunction(&lambda.CreateFunctionInput{
-			Description:  aws.String(fmt.Sprintf("waypoint %s", src.App)),
-			FunctionName: aws.String(src.App),
-			Role:         aws.String(roleArn),
-			Timeout:      aws.Int64(timeout),
-			MemorySize:   aws.Int64(mem),
-			Tags: map[string]*string{
-				"waypoint.app": aws.String(src.App),
-			},
-			PackageType: aws.String("Image"),
-			Code: &lambda.FunctionCode{
-				ImageUri: aws.String(img.Name()),
-			},
-			ImageConfig: &lambda.ImageConfig{},
-		})
+		// Run this in a loop to guard against eventual consistency errors with the specified
+		// role not showing up within lambda right away.
+		for i := 0; i < 30; i++ {
+			funcOut, err := lamSvc.CreateFunction(&lambda.CreateFunctionInput{
+				Description:  aws.String(fmt.Sprintf("waypoint %s", src.App)),
+				FunctionName: aws.String(src.App),
+				Role:         aws.String(roleArn),
+				Timeout:      aws.Int64(timeout),
+				MemorySize:   aws.Int64(mem),
+				Tags: map[string]*string{
+					"waypoint.app": aws.String(src.App),
+				},
+				PackageType: aws.String("Image"),
+				Code: &lambda.FunctionCode{
+					ImageUri: aws.String(img.Name()),
+				},
+				ImageConfig: &lambda.ImageConfig{},
+			})
 
-		if err != nil {
-			return nil, err
+			if err != nil {
+				// if we encounter an unrecoverable error, exit now.
+				if aerr, ok := err.(awserr.Error); ok {
+					switch aerr.Code() {
+					case "ResourceConflictException":
+						return nil, err
+					}
+				}
+
+				// otherwise sleep and try again
+				time.Sleep(2 * time.Second)
+			} else {
+				funcarn = *funcOut.FunctionArn
+				break
+			}
 		}
+	}
 
-		funcarn = *funcOut.FunctionArn
+	if funcarn == "" {
+		return nil, fmt.Errorf("Unable to create function, timed out trying")
 	}
 
 	step.Done()
@@ -378,6 +396,7 @@ func (p *Platform) Deploy(
 	// requires that the name is 32 characters or less.
 	if len(serviceName) > 32 {
 		serviceName = serviceName[:32]
+		log.Debug("using a shortened value for service name due to AWS's length limits", "serviceName", serviceName)
 	}
 
 	ctg, err := svc.CreateTargetGroup(&elbv2.CreateTargetGroupInput{
@@ -404,6 +423,7 @@ func (p *Platform) Deploy(
 
 	step.Done()
 
+	deployment.Region = p.config.Region
 	deployment.Id = id
 	deployment.FuncArn = funcarn
 	deployment.VerArn = verarn
@@ -432,7 +452,7 @@ func (p *Platform) Exec(
 ) (*component.ExecResult, error) {
 	rewriteLine(es.Output, "Launching ECS task to provide shell...")
 
-	sshMaterial, err := cebssh.GenerateKeys()
+	sshMaterial, err := wpssh.GenerateKeys()
 	if err != nil {
 		return nil, err
 	}
@@ -738,7 +758,7 @@ deploy {
 
 	doc.SetField(
 		"memory",
-		"the amonut of memory, in megabytes, to assign the function",
+		"the amount of memory, in megabytes, to assign the function",
 		docs.Default("265"),
 	)
 
